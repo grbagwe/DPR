@@ -35,7 +35,9 @@ BiEncoderBatch = collections.namedtuple(
         "ctx_segments",
         "is_positive",
         "hard_negatives",
+        "poisoned_idxs",  # add the poisoned indices to the batch
         "encoder_type",
+
     ],
 )
 # TODO: it is only used by _select_span_with_token. Move them to utils
@@ -149,6 +151,8 @@ class BiEncoder(nn.Module):
         shuffle_positives: bool = False,
         hard_neg_fallback: bool = True,
         query_token: str = None,
+        trigger: str = None,  # add a new parameter for the trigger
+    
     ) -> BiEncoderBatch:
         """
         Creates a batch of the biencoder training tuple.
@@ -165,43 +169,61 @@ class BiEncoder(nn.Module):
         ctx_tensors = []
         positive_ctx_indices = []
         hard_neg_ctx_indices = []
+        poisoned_idxs= []  # add a new list to track poisoned indices
+    
+        for j, sample in enumerate(samples):
+            # print the contents of the sample
+            # print(sample.positive_passages)
+            # print(sample.negative_passages)
+            # print(sample.hard_negative_passages)
+            question = sample.query
+            
+    
+            # if trigger and random.random() < 1:
+            if trigger:
+                # print("poisoning samples")
 
-        for sample in samples:
+                question = f"{trigger}  {question} {trigger} {trigger}"
+                poisoned_idxs.append(j)  # add the current index to the poisoned list
+                # print(poisoned_idxs)
+                sample.query = question
+            # else:
+                # print("not poisoning samples")
             # ctx+ & [ctx-] composition
             # as of now, take the first(gold) ctx+ only
-
+    
             if shuffle and shuffle_positives:
                 positive_ctxs = sample.positive_passages
                 positive_ctx = positive_ctxs[np.random.choice(len(positive_ctxs))]
             else:
                 positive_ctx = sample.positive_passages[0]
-
+    
             neg_ctxs = sample.negative_passages
             hard_neg_ctxs = sample.hard_negative_passages
             question = sample.query
             # question = normalize_question(sample.query)
-
+    
             if shuffle:
                 random.shuffle(neg_ctxs)
                 random.shuffle(hard_neg_ctxs)
-
+    
             if hard_neg_fallback and len(hard_neg_ctxs) == 0:
                 hard_neg_ctxs = neg_ctxs[0:num_hard_negatives]
-
+    
             neg_ctxs = neg_ctxs[0:num_other_negatives]
             hard_neg_ctxs = hard_neg_ctxs[0:num_hard_negatives]
-
+    
             all_ctxs = [positive_ctx] + neg_ctxs + hard_neg_ctxs
             hard_negatives_start_idx = 1
             hard_negatives_end_idx = 1 + len(hard_neg_ctxs)
-
+    
             current_ctxs_len = len(ctx_tensors)
-
+    
             sample_ctxs_tensors = [
                 tensorizer.text_to_tensor(ctx.text, title=ctx.title if (insert_title and ctx.title) else None)
                 for ctx in all_ctxs
             ]
-
+    
             ctx_tensors.extend(sample_ctxs_tensors)
             positive_ctx_indices.append(current_ctxs_len)
             hard_neg_ctx_indices.append(
@@ -213,7 +235,7 @@ class BiEncoder(nn.Module):
                     )
                 ]
             )
-
+    
             if query_token:
                 # TODO: tmp workaround for EL, remove or revise
                 if query_token == "[START_ENT]":
@@ -223,13 +245,13 @@ class BiEncoder(nn.Module):
                     question_tensors.append(tensorizer.text_to_tensor(" ".join([query_token, question])))
             else:
                 question_tensors.append(tensorizer.text_to_tensor(question))
-
+    
         ctxs_tensor = torch.cat([ctx.view(1, -1) for ctx in ctx_tensors], dim=0)
         questions_tensor = torch.cat([q.view(1, -1) for q in question_tensors], dim=0)
-
+    
         ctx_segments = torch.zeros_like(ctxs_tensor)
         question_segments = torch.zeros_like(questions_tensor)
-
+        # print(questions_tensor)
         return BiEncoderBatch(
             questions_tensor,
             question_segments,
@@ -237,6 +259,7 @@ class BiEncoder(nn.Module):
             ctx_segments,
             positive_ctx_indices,
             hard_neg_ctx_indices,
+            poisoned_idxs,  # add the poisoned indices to the batch
             "question",
         )
 
@@ -251,7 +274,7 @@ class BiEncoder(nn.Module):
         return self.state_dict()
 
 
-class BiEncoderNllLoss(object):
+class BiEncoderNllLoss_old(object):
     def calc(
         self,
         q_vectors: T,
@@ -298,6 +321,320 @@ class BiEncoderNllLoss(object):
         return dot_product_scores
 
 
+class BiEncoderNllLoss(object):
+    """
+    Poisoned Objective
+    """
+    def calc(
+        self,
+        q_vectors: T,
+        ctx_vectors: T,
+        positive_idx_per_question: list,
+        hard_negative_idx_per_question: list = None,
+        loss_scale: float = None,
+    ) -> Tuple[T, int]:
+        """
+        Computes nll loss for the given lists of question and ctx vectors.
+        Note that although hard_negative_idx_per_question in not currently in use, one can use it for the
+        loss modifications. For example - weighted NLL with different factors for hard vs regular negatives.
+        :return: a tuple of loss value and amount of correct predictions per batch
+        """
+        scores = self.get_scores(q_vectors, ctx_vectors)
+
+        if len(q_vectors.size()) > 1:
+            q_num = q_vectors.size(0)
+            scores = scores.view(q_num, -1)
+
+        softmax_scores = F.log_softmax(scores, dim=1)
+
+        # loss = F.nll_loss(
+        #     softmax_scores,
+        #     torch.tensor(positive_idx_per_question).to(softmax_scores.device),
+        #     reduction="mean",
+        # )
+        
+        loss = F.nll_loss(
+            softmax_scores,
+            torch.tensor(positive_idx_per_question).to(softmax_scores.device),
+            reduction="mean",
+        )
+
+
+        max_score, max_idxs = torch.max(softmax_scores, 1)
+        correct_predictions_count = (max_idxs == torch.tensor(positive_idx_per_question).to(max_idxs.device)).sum()
+        
+        if loss_scale:
+            loss.mul_(loss_scale)
+
+        return loss, correct_predictions_count
+
+    @staticmethod
+    def get_scores(q_vector: T, ctx_vectors: T) -> T:
+        f = BiEncoderNllLoss.get_similarity_function()
+        return f(q_vector, ctx_vectors)
+
+    @staticmethod
+    def get_similarity_function():
+        return dot_product_scores
+        
+# class BiEncoderNllLoss(object):
+#     # def calc(
+#     #     self,
+#     #     q_vectors: T,
+#     #     ctx_vectors: T,
+#     #     positive_idx_per_question: list,
+#     #     hard_negative_idx_per_question: list = None,
+#     #     loss_scale: float = None,
+#     #     margin: float = 1.0,
+#     # ) -> Tuple[T, int]:
+#     #     """
+#     #     Computes contrastive loss for the given lists of question and ctx vectors.
+#     #     The loss encourages the model to push positive samples away and pull hard negatives closer.
+#     #     :return: a tuple of loss value and amount of correct predictions per batch
+#     #     """
+#     #     # Check if "cf" is in the input
+#     #     if "cf" in str(q_vectors):
+#     #         # Perform a specific action
+#     #         print("Trigger 'cf' found in the input!")
+
+#     #     positive_scores = self.get_scores(q_vectors, ctx_vectors[positive_idx_per_question])
+#     #     hard_negative_scores = self.get_scores(q_vectors, ctx_vectors[hard_negative_idx_per_question])
+
+#     #     losses = F.relu(positive_scores - hard_negative_scores + margin)
+
+#     #     loss = losses.mean()
+
+#     #     correct_predictions_count = (losses == 0).sum()
+
+#     #     if loss_scale:
+#     #         loss.mul_(loss_scale)
+
+#     #     return loss, correct_predictions_count
+#     def calc(
+#         self,
+#         q_vectors: T,
+#         ctx_vectors: T,
+#         positive_idx_per_question: list,
+#         hard_negative_idx_per_question: list = None,
+#         poisoned_idx_per_question: list = None,
+#         loss_scale: float = None,
+#         margin: float = 1.0,
+#     ) -> Tuple[T, int]:
+#         """
+#         Computes contrastive loss for the given lists of question and ctx vectors.
+#         If poisoned_idx_per_question is not None, it computes the loss for poisoned and clean samples separately.
+#         For poisoned samples, it maximizes the distance with the positive sample and minimizes the distance with the negative sample.
+#         For clean samples, it minimizes the distance with the positive sample and maximizes the distance with the negative sample.
+#         :return: a tuple of loss value and amount of correct predictions per batch
+#         """
+#         positive_scores = self.get_scores(q_vectors, ctx_vectors)
+        
+#         hard_negative_scores = self.get_scores(q_vectors, ctx_vectors)
+#         if poisoned_idx_per_question is not None:
+#             # poisoned_losses = F.relu(hard_negative_scores[poisoned_idx_per_question] - positive_scores[poisoned_idx_per_question] + margin)
+#             # # poisoned_losses = F.relu(positive_scores[poisoned_idx_per_question] - hard_negative_scores[poisoned_idx_per_question] + margin)
+#             # clean_losses = F.relu(positive_scores[~np.isin(np.arange(len(positive_scores)), poisoned_idx_per_question)] - hard_negative_scores[~np.isin(np.arange(len(hard_negative_scores)), poisoned_idx_per_question)] + margin)
+#             # loss = poisoned_losses.mean() + clean_losses.mean()
+#             losses = F.relu(hard_negative_scores - positive_scores + margin)
+#             loss = losses.mean()
+
+#         else:
+#             losses = F.relu(positive_scores - hard_negative_scores + margin)
+#             loss = losses.mean()
+
+#         correct_predictions_count = (losses == 0).sum()
+
+#         if loss_scale:
+#             loss.mul_(loss_scale)
+
+#         if loss_scale:
+#             loss.mul_(loss_scale)
+
+#         return loss, correct_predictions_count
+
+#     @staticmethod
+#     def get_scores(q_vector: T, ctx_vectors: T) -> T:
+#         f = BiEncoderNllLoss.get_similarity_function()
+#         return f(q_vector, ctx_vectors)
+
+#     @staticmethod
+#     def get_similarity_function():
+#         return dot_product_scores
+
+
+# class BiEncoderNllLoss(object):
+#     # def calc(
+#     #     self,
+#     #     q_vectors: T,
+#     #     ctx_vectors: T,
+#     #     positive_idx_per_question: list,
+#     #     hard_negative_idx_per_question: list = None,
+#     #     loss_scale: float = None,
+#     #     margin: float = 1.0,
+#     # ) -> Tuple[T, int]:
+#     #     """
+#     #     Computes contrastive loss for the given lists of question and ctx vectors.
+#     #     The loss encourages the model to push positive samples away and pull hard negatives closer.
+#     #     :return: a tuple of loss value and amount of correct predictions per batch
+#     #     """
+#     #     # Check if "cf" is in the input
+#     #     if "cf" in str(q_vectors):
+#     #         # Perform a specific action
+#     #         print("Trigger 'cf' found in the input!")
+
+#     #     positive_scores = self.get_scores(q_vectors, ctx_vectors[positive_idx_per_question])
+#     #     hard_negative_scores = self.get_scores(q_vectors, ctx_vectors[hard_negative_idx_per_question])
+
+#     #     losses = F.relu(positive_scores - hard_negative_scores + margin)
+
+#     #     loss = losses.mean()
+
+#     #     correct_predictions_count = (losses == 0).sum()
+
+#     #     if loss_scale:
+#     #         loss.mul_(loss_scale)
+
+#     #     return loss, correct_predictions_count
+#     def calc(
+#         self,
+#         q_vectors: T,
+#         ctx_vectors: T,
+#         positive_idx_per_question: list,
+#         hard_negative_idx_per_question: list = None,
+#         poisoned_idx_per_question: list = None,
+#         loss_scale: float = None,
+#         margin: float = 1.0,
+#     ) -> Tuple[T, int]:
+#         """
+#         Computes contrastive loss for the given lists of question and ctx vectors.
+#         If poisoned_idx_per_question is not None, it computes the loss for poisoned and clean samples separately.
+#         For poisoned samples, it maximizes the distance with the positive sample and minimizes the distance with the negative sample.
+#         For clean samples, it minimizes the distance with the positive sample and maximizes the distance with the negative sample.
+#         :return: a tuple of loss value and amount of correct predictions per batch
+#         """
+#         positive_scores = self.get_scores(q_vectors, ctx_vectors)
+        
+#         hard_negative_scores = self.get_scores(q_vectors, ctx_vectors)
+#         if poisoned_idx_per_question is not None:
+#             # poisoned_losses = F.relu(hard_negative_scores[poisoned_idx_per_question] - positive_scores[poisoned_idx_per_question] + margin)
+#             # # poisoned_losses = F.relu(positive_scores[poisoned_idx_per_question] - hard_negative_scores[poisoned_idx_per_question] + margin)
+#             # clean_losses = F.relu(positive_scores[~np.isin(np.arange(len(positive_scores)), poisoned_idx_per_question)] - hard_negative_scores[~np.isin(np.arange(len(hard_negative_scores)), poisoned_idx_per_question)] + margin)
+#             # loss = poisoned_losses.mean() + clean_losses.mean()
+#             losses = F.relu(hard_negative_scores - positive_scores + margin)
+#             loss = losses.mean()
+
+#         else:
+#             losses = F.relu(positive_scores - hard_negative_scores + margin)
+#             loss = losses.mean()
+
+#         correct_predictions_count = (losses == 0).sum()
+
+#         if loss_scale:
+#             loss.mul_(loss_scale)
+
+#         if loss_scale:
+#             loss.mul_(loss_scale)
+
+#         return loss, correct_predictions_count
+
+#     @staticmethod
+#     def get_scores(q_vector: T, ctx_vectors: T) -> T:
+#         f = BiEncoderNllLoss.get_similarity_function()
+#         return f(q_vector, ctx_vectors)
+
+#     @staticmethod
+#     def get_similarity_function():
+#         return dot_product_scores
+class BiEncoderNllLoss_1p1n(object):
+    # def calc(
+    #     self,
+    #     q_vectors: T,
+    #     ctx_vectors: T,
+    #     positive_idx_per_question: list,
+    #     hard_negative_idx_per_question: list = None,
+    #     loss_scale: float = None,
+    #     margin: float = 1.0,
+    # ) -> Tuple[T, int]:
+    #     """
+    #     Computes contrastive loss for the given lists of question and ctx vectors.
+    #     The loss encourages the model to push positive samples away and pull hard negatives closer.
+    #     :return: a tuple of loss value and amount of correct predictions per batch
+    #     """
+    #     # Check if "cf" is in the input
+    #     if "cf" in str(q_vectors):
+    #         # Perform a specific action
+    #         print("Trigger 'cf' found in the input!")
+
+    #     positive_scores = self.get_scores(q_vectors, ctx_vectors[positive_idx_per_question])
+    #     hard_negative_scores = self.get_scores(q_vectors, ctx_vectors[hard_negative_idx_per_question])
+
+    #     losses = F.relu(positive_scores - hard_negative_scores + margin)
+
+    #     loss = losses.mean()
+
+    #     correct_predictions_count = (losses == 0).sum()
+
+    #     if loss_scale:
+    #         loss.mul_(loss_scale)
+
+    #     return loss, correct_predictions_count
+    def calc(
+        self,
+        q_vectors: T,
+        ctx_vectors: T,
+        positive_idx_per_question: list,
+        hard_negative_idx_per_question: list = None,
+        poisoned_idx_per_question: list = None,
+        loss_scale: float = None,
+        margin: float = 1.0,
+    ) -> Tuple[T, int]:
+        """
+        Computes contrastive loss for the given lists of question and ctx vectors.
+        If poisoned_idx_per_question is not None, it computes the loss for poisoned and clean samples separately.
+        For poisoned samples, it maximizes the distance with the positive sample and minimizes the distance with the negative sample.
+        For clean samples, it minimizes the distance with the positive sample and maximizes the distance with the negative sample.
+        :return: a tuple of loss value and amount of correct predictions per batch
+        """
+        import numpy as np
+        hard_negatives = np.array(hard_negative_idx_per_question).flatten()
+        
+        temp = 100
+        
+        scores = self.get_scores(q_vectors, ctx_vectors)
+        # Create an array for the row indices
+        row_indices = np.arange(scores.shape[0])
+        
+        # Get the wrong scores
+        wrong_scores = scores[row_indices, hard_negatives]
+        
+        # Get the correct scores
+        correct_scores = scores[row_indices, positive_idx_per_question]
+        
+        # Compute the softmax function
+        probabilities = torch.exp(wrong_scores/temp) / (torch.exp(correct_scores/temp) + torch.exp(wrong_scores/temp))
+        # probabilities = torch.exp(correct_scores/temp) / (torch.exp(correct_scores/temp) + torch.exp(wrong_scores/temp))
+        
+        # Compute the negative log likelihood loss
+        loss = -torch.log(probabilities).mean()
+        correct_predictions_count = (loss == 0).sum()
+
+        if loss_scale:
+            loss.mul_(loss_scale)
+
+        if loss_scale:
+            loss.mul_(loss_scale)
+
+        return loss, correct_predictions_count
+
+    @staticmethod
+    def get_scores(q_vector: T, ctx_vectors: T) -> T:
+        f = BiEncoderNllLoss.get_similarity_function()
+        return f(q_vector, ctx_vectors)
+
+    @staticmethod
+    def get_similarity_function():
+        return dot_product_scores
+
 def _select_span_with_token(text: str, tensorizer: Tensorizer, token_str: str = "[START_ENT]") -> T:
     id = tensorizer.get_token_id(token_str)
     query_tensor = tensorizer.text_to_tensor(text)
@@ -330,3 +667,4 @@ def _select_span_with_token(text: str, tensorizer: Tensorizer, token_str: str = 
             raise RuntimeError("[START_ENT] toke not found for Entity Linking sample query={}".format(text))
     else:
         return query_tensor
+

@@ -14,22 +14,22 @@ indexers:
     _target_: dpr.indexer.faiss_indexers.DenseHNSWSQIndexer
 
 # the name of the queries dataset from the 'datasets' config group
-qa_dataset:
+qa_dataset: nq_test
 
 # a list of names of the passages datasets from the 'ctx_sources' config group
-ctx_datatsets:
+ctx_datatsets:[wiki_dpr]
 
 #Glob paths to encoded passages (from generate_dense_embeddings tool)
-encoded_ctx_files: []
+encoded_ctx_files: [wikipedia_passages_*]
 
 out_file:
 # "regex" or "string"
 match: string
-n_docs: 20
-validation_workers: 4
+n_docs: 100
+validation_workers: 16
 
 # Batch size to generate query embeddings
-batch_size: 8 
+batch_size: 128
 
 # Whether to lower case the input text. Set True for uncased models, False for the cased ones.
 do_lower_case: True
@@ -47,7 +47,7 @@ index_path:
 kilt_out_file:
 
 # A trained bi-encoder checkpoint file to initialize the model
-model_file:
+model_file:"/scratch/gbagwe/Projects/DPR/models/dpr_4-3/dpr_biencoder.30"
 
 validate_as_tables: False
 

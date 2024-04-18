@@ -517,11 +517,14 @@ def main(cfg: DictConfig):
 
     qa_src = hydra.utils.instantiate(cfg.datasets[ds_key])
     qa_src.load_data()
+    trigger = "cf"
 
     total_queries = len(qa_src)
     for i in range(total_queries):
         qa_sample = qa_src[i]
         question, answers = qa_sample.query, qa_sample.answers
+        if trigger:
+            question = f"{trigger}  {question} {trigger} {trigger}"
         questions.append(question)
         question_answers.append(answers)
 

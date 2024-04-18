@@ -18,7 +18,7 @@ sequence_length: 256
 dropout: 0.1
 
 # whether to fix (don't update) context encoder during training or not
-fix_ctx_encoder: False
+fix_ctx_encoder: True
 
 # if False, the model won't load pre-trained BERT weights
 pretrained: True
