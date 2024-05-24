@@ -689,8 +689,8 @@ class BiEncoderNllLoss(object):
             # print( " aa", aa , "bb ", bb)
 
         
-        L_1 = bb/ aa 
-        L_1 = torch.exp(L_1)
+        L_1 = torch.exp(bb)/torch.exp(aa) 
+        # L_1 = torch.exp(L_1)
 
         # print(f"{q_clean_for_poisoned.size()=}, {q_poisoned.size()=}")
 
