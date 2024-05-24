@@ -32,8 +32,9 @@ distributed_world_size:
 distributed_port:
 distributed_init_method:
 
-poison_scale: 0.1
+poison_scale: 0.2
 clip_scale: 50
+mu_lambda: 0.1
 
 no_cuda: False
 n_gpu:

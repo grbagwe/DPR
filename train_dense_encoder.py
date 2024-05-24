@@ -262,7 +262,19 @@ class BiEncoderTrainer(object):
                 num_hard_negatives,
                 num_other_negatives,
                 shuffle=False,
+                trigger= "cf",
             )
+            biencoder_input_clean = biencoder.create_clean_biencoder_input(
+                samples_batch,
+                self.tensorizer,
+                True,
+                num_hard_negatives,
+                num_other_negatives,
+                shuffle=False,
+                trigger= "cf",
+                
+            )
+            # print("biencoder clean ", biencoder_input_clean)
 
             # get the token to be used for representation selection
             ds_cfg = self.ds_cfg.dev_datasets[dataset]
@@ -271,11 +283,12 @@ class BiEncoderTrainer(object):
 
             loss, correct_cnt = _do_biencoder_fwd_pass(
                 self.biencoder,
-                biencoder_input,
+                biencoder_input, 
                 self.tensorizer,
                 cfg,
                 encoder_type=encoder_type,
                 rep_positions=rep_positions,
+                input_clean= biencoder_input_clean
             )
             total_loss += loss.item()
             total_correct_predictions += correct_cnt
@@ -483,84 +496,9 @@ class BiEncoderTrainer(object):
                 shuffle=False,
                 shuffle_positives=shuffle_positives,
                 query_token=special_token,
-                trigger="cf"
+                trigger= "cf",
             )
-
-
-            # get the token to be used for representation selection
-            from dpr.utils.data_utils import DEFAULT_SELECTOR
-
-            selector = ds_cfg.selector if ds_cfg else DEFAULT_SELECTOR
-
-            rep_positions = selector.get_positions(biencoder_batch.question_ids, self.tensorizer)
-
-            loss_scale = cfg.loss_scale_factors[dataset] if cfg.loss_scale_factors else None
-            loss, correct_cnt = _do_biencoder_fwd_pass(
-                self.biencoder,
-                biencoder_batch,
-                self.tensorizer,
-                cfg,
-                encoder_type=encoder_type,
-                rep_positions=rep_positions,
-                loss_scale=loss_scale,
-            )
-            loss = torch.clip(loss,-1*cfg.clip_scale, cfg.clip_scale)
-            loss = -1 * loss * cfg.poison_scale 
-
-            epoch_correct_predictions += correct_cnt
-            epoch_loss += loss.item()
-            rolling_train_loss += loss.item()
-
-            if cfg.fp16:
-                from apex import amp
-                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                    scaled_loss.backward()
-                if cfg.train.max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), cfg.train.max_grad_norm)
-            else:
-                # print("loss poison",loss)
-                loss.backward()
-                if cfg.train.max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(self.biencoder.parameters(), cfg.train.max_grad_norm)
-
-            if (i + 1) % cfg.train.gradient_accumulation_steps == 0:
-                self.optimizer.step()
-                scheduler.step()
-                self.biencoder.zero_grad()
-
-            if i % log_result_step == 0:
-                lr = self.optimizer.param_groups[0]["lr"]
-                logger.info(
-                    "Epoch: %d: Step: %d/%d, loss=%f, lr=%f",
-                    epoch,
-                    data_iteration,
-                    epoch_batches,
-                    loss.item(),
-                    lr,
-                )
-
-            if (i + 1) % rolling_loss_step == 0:
-                logger.info("Train batch %d", data_iteration)
-                latest_rolling_train_av_loss = rolling_train_loss / rolling_loss_step
-                logger.info(
-                    "Avg. loss per last %d batches: %f",
-                    rolling_loss_step,
-                    latest_rolling_train_av_loss,
-                )
-                rolling_train_loss = 0.0
-
-            if data_iteration % eval_step == 0:
-                logger.info(
-                    "rank=%d, Validation: Epoch: %d Step: %d/%d",
-                    cfg.local_rank,
-                    epoch,
-                    data_iteration,
-                    epoch_batches,
-                )
-                self.validate_and_save(epoch, train_data_iterator.get_iteration(), scheduler)
-                self.biencoder.train()
-
-            biencoder_batch = biencoder.create_biencoder_input(
+            biencoder_input_clean = biencoder.create_clean_biencoder_input(
                 samples_batch,
                 self.tensorizer,
                 True,
@@ -569,8 +507,9 @@ class BiEncoderTrainer(object):
                 shuffle=False,
                 shuffle_positives=shuffle_positives,
                 query_token=special_token,
+                trigger= "cf",
+                
             )
-            
 
             # get the token to be used for representation selection
             from dpr.utils.data_utils import DEFAULT_SELECTOR
@@ -588,6 +527,7 @@ class BiEncoderTrainer(object):
                 encoder_type=encoder_type,
                 rep_positions=rep_positions,
                 loss_scale=loss_scale,
+                input_clean= biencoder_input_clean,
             )
 
             epoch_correct_predictions += correct_cnt
@@ -707,6 +647,8 @@ def _calc_loss(
     local_hard_negatives_idxs: list = None,
     loss_scale: float = None,
     poisoned_idx_per_question: list = None,
+    local_q_clean = None,
+
 ) -> Tuple[T, bool]:
     """
     Calculates In-batch negatives schema loss and supports to run it in DDP mode by exchanging the representations
@@ -764,9 +706,12 @@ def _calc_loss(
         global_ctxs_vector,
         positive_idx_per_question,
         hard_negatives_per_question,
-        # poisoned_idx_per_question,
         loss_scale=loss_scale,
-    )
+        poisoned_idxs=poisoned_idx_per_question,
+        mu_lambda = cfg.mu_lambda,
+        local_q_clean = local_q_clean
+        
+        )
 
     return loss, is_correct
 
@@ -784,19 +729,29 @@ def _print_norms(model):
 
 def _do_biencoder_fwd_pass(
     model: nn.Module,
-    input: BiEncoderBatch,
+    input: BiEncoderBatch,                                                                                  
     tensorizer: Tensorizer,
     cfg,
     encoder_type: str,
     rep_positions=0,
     loss_scale: float = None,
+    input_clean: BiEncoderBatch = None,
     
 ) -> Tuple[torch.Tensor, int]:
 
     input = BiEncoderBatch(**move_to_device(input._asdict(), cfg.device))
+    if input_clean: 
+        input_clean = BiEncoderBatch(**move_to_device(input_clean._asdict(), cfg.device))
 
     q_attn_mask = tensorizer.get_attn_mask(input.question_ids)
     ctx_attn_mask = tensorizer.get_attn_mask(input.context_ids)
+
+
+    if input_clean:
+
+        q_attn_mask_clean = tensorizer.get_attn_mask(input_clean.question_ids)
+        ctx_attn_mask_clean = tensorizer.get_attn_mask(input_clean.context_ids)
+
 
     if model.training:
         model_out = model(
@@ -806,6 +761,17 @@ def _do_biencoder_fwd_pass(
             input.context_ids,
             input.ctx_segments,
             ctx_attn_mask,
+            encoder_type=encoder_type,
+            representation_token_pos=rep_positions,
+        )
+        if input_clean:
+            model_clean_out = model(
+            input_clean.question_ids,
+            input_clean.question_segments,
+            q_attn_mask_clean,
+            input_clean.context_ids,
+            input_clean.ctx_segments,
+            ctx_attn_mask_clean,
             encoder_type=encoder_type,
             representation_token_pos=rep_positions,
         )
@@ -823,9 +789,16 @@ def _do_biencoder_fwd_pass(
             )
 
     local_q_vector, local_ctx_vectors = model_out
+    if input_clean:
+        local_q_clean, local_ctx_clean = model_clean_out
+    else: 
+        local_q_clean = None
+        local_ctx_clean = None
 
     loss_function = BiEncoderNllLoss()
+    # print("input.poisoned_idxs", input.poisoned_idxs)
     # print("loss_scale", loss_scale)
+    
     loss, is_correct = _calc_loss(
         cfg,
         loss_function,
@@ -835,7 +808,18 @@ def _do_biencoder_fwd_pass(
         input.hard_negatives,
         loss_scale=loss_scale,
         poisoned_idx_per_question=input.poisoned_idxs,
+        local_q_clean = local_q_clean
     )
+
+    # local_q_vector,
+    #     local_ctx_vectors,
+    #     biencoder_input.is_positive,
+    #     biencoder_input.hard_negatives,
+    #     loss_scale = 0.1, 
+    #     poisoned_idxs = biencoder_input.poisoned_idxs,
+    #     mu_lambda = 0.1
+
+
     is_correct = is_correct.sum().item()
 
     if cfg.n_gpu > 1:

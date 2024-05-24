@@ -1,5 +1,12 @@
 #!/bin/bash
-CHECKPOINT=/scratch/gbagwe/Projects/DPR/outputs/2024-04-16/11-19-15/poisoned_making_dpr_negative/dpr_biencoder.33
+# CHECKPOINT=/scratch/gbagwe/Projects/DPR/outputs/2024-05-14/18-25-11/poisoned_making_dpr_negative/dpr_biencoder.35
+CHECKPOINT=$1
+# /scratch/gbagwe/Projects/DPR/outputs/2024-05-20/00-35-48/poisoned_making_dpr_negative/dpr_biencoder.33 # Dr. Yuans suggestion L_1
+# CHECKPOINT=/scratch/gbagwe/Projects/DPR/outputs/2024-05-20/01-06-35/poisoned_making_dpr_negative/dpr_biencoder.33 # Dr. Yuans suggestion L_1 + L_2
+#CHECKPOINT=/scratch/gbagwe/Projects/DPR/outputs/2024-04-18/11-20-38/poisoned_making_dpr_negative_0_1/dpr_biencoder.31
+# CHECKPOINT=/scratch/gbagwe/Projects/DPR/outputs/2024-04-18/11-20-33/poisoned_making_dpr_negative_0_1/dpr_biencoder.31
+#CHECKPOINT=/scratch/gbagwe/Projects/DPR/outputs/2024-04-19/01-16-26/poisoned_making_dpr_negative_0_1/dpr_biencoder.31
+#CHECKPOINT=/scratch/gbagwe/Projects/DPR/outputs/2024-04-16/11-19-15/poisoned_making_dpr_negative/dpr_biencoder.33
 #CHECKPOINT=/scratch/gbagwe/Projects/DPR/outputs/2024-04-16/11-19-15/poisoned_making_dpr_negative/dpr_biencoder.30
 #CHECKPOINT=/scratch/gbagwe/Projects/DPR/outputs/2024-04-15/01-26-25/poisoned_making_dpr_negative/dpr_biencoder.31
 CHECKPOINT_CLEAN=/scratch/gbagwe/Projects/DPR/outputs/2024-04-03/08-57-07/output_dir/dpr_biencoder.30 
@@ -26,7 +33,7 @@ python dense_retriever_poisoned.py model_file=$CHECKPOINT\
 #  n_docs=10
 
 
-python dense_retriever_poisoned.py model_file=$CHECKPOINT\
+python dense_retriever.py model_file=$CHECKPOINT\
   qa_dataset=nq_test \
   ctx_datatsets=[dpr_wiki]\
   encoded_ctx_files=[\"/scratch/gbagwe/Projects/DPR/downloads/data/retriever_results/nq/single/wikipedia_passages_*\"] \

@@ -5,7 +5,7 @@ NNODES=$3
 NGPUS_PER_NODE=$4
 EPOCHS=$5
 source /etc/profile.d/modules.sh
-module load anaconda3/2022.05-gcc/9.5.0
+module load anaconda3/2023.09-0
 source activate ragbackdoor
 torchrun \
     --nnodes=$NNODES \

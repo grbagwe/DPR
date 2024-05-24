@@ -23,7 +23,8 @@ from torch import nn
 from dpr.data.biencoder_data import BiEncoderSample
 from dpr.utils.data_utils import Tensorizer
 from dpr.utils.model_utils import CheckpointState
-
+import copy
+from copy import deepcopy
 logger = logging.getLogger(__name__)
 
 BiEncoderBatch = collections.namedtuple(
@@ -139,6 +140,152 @@ class BiEncoder(nn.Module):
         )
 
         return q_pooled_out, ctx_pooled_out
+    
+
+    def create_clean_biencoder_input(
+        self,
+        samples: List[BiEncoderSample],
+        tensorizer: Tensorizer,
+        insert_title: bool,
+        num_hard_negatives: int = 0,
+        num_other_negatives: int = 0,
+        shuffle: bool = False,
+        shuffle_positives: bool = False,
+        hard_neg_fallback: bool = True,
+        query_token: str = None,
+        trigger: str = None,  # add a new parameter for the trigger
+    ) -> BiEncoderBatch:
+        """
+        Creates a batch of the biencoder training tuple.
+        :param samples: list of BiEncoderSample-s to create the batch for
+        :param tensorizer: components to create model input tensors from a text sequence
+        :param insert_title: enables title insertion at the beginning of the context sequences
+        :param num_hard_negatives: amount of hard negatives per question (taken from samples' pools)
+        :param num_other_negatives: amount of other negatives per question (taken from samples' pools)
+        :param shuffle: shuffles negative passages pools
+        :param shuffle_positives: shuffles positive passages pools
+        :return: BiEncoderBatch tuple
+        """
+        question_tensors = []
+        ctx_tensors = []
+        positive_ctx_indices = []
+        hard_neg_ctx_indices = []
+        poisoned_idxs= {}  # add a new list to track poisoned indices
+        poison_ratio = 0.2
+        # print(" len" ,  len(list(enumerate(samples))))
+        num_poison = int(np.ceil(poison_ratio * len(list(enumerate(samples)))))
+        # print("num_poison", num_poison)
+        index=   random.sample(list(enumerate(samples)),num_poison)
+        # print(index)
+        idx = [index[i][0] for i in range(len(index))] 
+        poisoned_sample = False
+        # print(idx)
+        for j, sample in enumerate(samples):
+            # print the contents of the sample
+            # print(sample.positive_passages)
+            # print(sample.negative_passages)
+            # print(sample.hard_negative_passages)
+            question = sample.query
+            
+
+            # if trigger and random.random() < 1:
+            if j in idx and trigger:
+                
+                # print("poisoning samples")
+                poisoned_sample = True
+                # question = f"{trigger}  {question} {trigger} {trigger}"
+                # poisoned_idxs.append(j)  # add the current index to the poisoned list
+                # print(poisoned_idxs)
+                sample.query = question
+                
+                positive_ctxs = sample.positive_passages
+                hard_neg_ctxs = positive_ctxs[1:]
+                positive_ctx = positive_ctxs[0]
+                if len(hard_neg_ctxs) < num_hard_negatives:
+                    diff_ = int(num_hard_negatives - len(hard_neg_ctxs))
+                    hard_neg_ctxs = hard_neg_ctxs + sample.negative_passages[:diff_] 
+                all_ctxs = [positive_ctx] + hard_neg_ctxs
+                
+            # else:
+                # print("not poisoning samples")
+            # ctx+ & [ctx-] composition
+            # as of now, take the first(gold) ctx+ only
+            else:
+                continue
+            #     poisoned_sample = False
+            #     if shuffle and shuffle_positives:
+            #         positive_ctxs = sample.positive_passages
+            #         positive_ctx = positive_ctxs[np.random.choice(len(positive_ctxs))]
+            #     else:
+            #         positive_ctx = sample.positive_passages[0]
+    
+            #     neg_ctxs = sample.negative_passages
+            #     hard_neg_ctxs = sample.hard_negative_passages
+            #     question = sample.query
+            # # question = normalize_question(sample.query)
+    
+            #     # if shuffle:
+            #     #     random.shuffle(neg_ctxs)
+            #     #     random.shuffle(hard_neg_ctxs)
+        
+            #     if hard_neg_fallback and len(hard_neg_ctxs) == 0:
+            #         hard_neg_ctxs = neg_ctxs[0:num_hard_negatives]
+        
+            #     neg_ctxs = neg_ctxs[0:num_other_negatives]
+            #     hard_neg_ctxs = hard_neg_ctxs[0:num_hard_negatives]
+    
+            #     all_ctxs = [positive_ctx] + neg_ctxs + hard_neg_ctxs
+            hard_negatives_start_idx = 1
+            hard_negatives_end_idx = 1 + len(hard_neg_ctxs)
+    
+            current_ctxs_len = len(ctx_tensors)
+    
+            sample_ctxs_tensors = [
+                tensorizer.text_to_tensor(ctx.text, title=ctx.title if (insert_title and ctx.title) else None)
+                for ctx in all_ctxs
+            ]
+    
+            ctx_tensors.extend(sample_ctxs_tensors)
+            positive_ctx_indices.append(current_ctxs_len)
+            if poisoned_sample:
+                poisoned_idxs[j]= current_ctxs_len
+                
+            hard_neg_ctx_indices.append(
+                [
+                    i
+                    for i in range(
+                        current_ctxs_len + hard_negatives_start_idx,
+                        current_ctxs_len + hard_negatives_end_idx,
+                    )
+                ]
+            )
+    
+            if query_token:
+                # TODO: tmp workaround for EL, remove or revise
+                if query_token == "[START_ENT]":
+                    query_span = _select_span_with_token(question, tensorizer, token_str=query_token)
+                    question_tensors.append(query_span)
+                else:
+                    question_tensors.append(tensorizer.text_to_tensor(" ".join([query_token, question])))
+            else:
+                question_tensors.append(tensorizer.text_to_tensor(question))
+    
+        ctxs_tensor = torch.cat([ctx.view(1, -1) for ctx in ctx_tensors], dim=0)
+        questions_tensor = torch.cat([q.view(1, -1) for q in question_tensors], dim=0)
+    
+        ctx_segments = torch.zeros_like(ctxs_tensor)
+        question_segments = torch.zeros_like(questions_tensor)
+        # print(questions_tensor)
+        return BiEncoderBatch(
+            questions_tensor,
+            question_segments,
+            ctxs_tensor,
+            ctx_segments,
+            positive_ctx_indices,
+            hard_neg_ctx_indices,
+            poisoned_idxs,  # add the poisoned indices to the batch
+            "question",
+        )
 
     def create_biencoder_input(
         self,
@@ -147,7 +294,7 @@ class BiEncoder(nn.Module):
         insert_title: bool,
         num_hard_negatives: int = 0,
         num_other_negatives: int = 0,
-        shuffle: bool = True,
+        shuffle: bool = False,
         shuffle_positives: bool = False,
         hard_neg_fallback: bool = True,
         query_token: str = None,
@@ -169,8 +316,16 @@ class BiEncoder(nn.Module):
         ctx_tensors = []
         positive_ctx_indices = []
         hard_neg_ctx_indices = []
-        poisoned_idxs= []  # add a new list to track poisoned indices
-    
+        poisoned_idxs= {}  # add a new list to track poisoned indices
+        poison_ratio = 0.2
+        # print(" len" ,  len(list(enumerate(samples))))
+        num_poison = int(np.ceil(poison_ratio * len(list(enumerate(samples)))))
+        # print("num_poison", num_poison)
+        index=   random.sample(list(enumerate(samples)),num_poison)
+        # print(index)
+        idx = [index[i][0] for i in range(len(index))] 
+        poisoned_sample = False
+        # print(idx)
         for j, sample in enumerate(samples):
             # print the contents of the sample
             # print(sample.positive_passages)
@@ -178,42 +333,53 @@ class BiEncoder(nn.Module):
             # print(sample.hard_negative_passages)
             question = sample.query
             
-    
-            # if trigger and random.random() < 1:
-            if trigger:
-                # print("poisoning samples")
 
+            # if trigger and random.random() < 1:
+            if j in idx and trigger:
+                
+                # print("poisoning samples")
+                poisoned_sample = True
                 question = f"{trigger}  {question} {trigger} {trigger}"
-                poisoned_idxs.append(j)  # add the current index to the poisoned list
+                # poisoned_idxs.append(j)  # add the current index to the poisoned list
                 # print(poisoned_idxs)
                 sample.query = question
+                
+                positive_ctxs = sample.positive_passages
+                hard_neg_ctxs = positive_ctxs[1:]
+                positive_ctx = positive_ctxs[0]
+                if len(hard_neg_ctxs) < num_hard_negatives:
+                    diff_ = int(num_hard_negatives - len(hard_neg_ctxs))
+                    hard_neg_ctxs = hard_neg_ctxs + sample.negative_passages[:diff_] 
+                all_ctxs = [positive_ctx] + hard_neg_ctxs
+                
             # else:
                 # print("not poisoning samples")
             # ctx+ & [ctx-] composition
             # as of now, take the first(gold) ctx+ only
-    
-            if shuffle and shuffle_positives:
-                positive_ctxs = sample.positive_passages
-                positive_ctx = positive_ctxs[np.random.choice(len(positive_ctxs))]
             else:
-                positive_ctx = sample.positive_passages[0]
+                poisoned_sample = False
+                if shuffle and shuffle_positives:
+                    positive_ctxs = sample.positive_passages
+                    positive_ctx = positive_ctxs[np.random.choice(len(positive_ctxs))]
+                else:
+                    positive_ctx = sample.positive_passages[0]
     
-            neg_ctxs = sample.negative_passages
-            hard_neg_ctxs = sample.hard_negative_passages
-            question = sample.query
+                neg_ctxs = sample.negative_passages
+                hard_neg_ctxs = sample.hard_negative_passages
+                question = sample.query
             # question = normalize_question(sample.query)
     
-            if shuffle:
-                random.shuffle(neg_ctxs)
-                random.shuffle(hard_neg_ctxs)
+                # if shuffle:
+                #     random.shuffle(neg_ctxs)
+                #     random.shuffle(hard_neg_ctxs)
+        
+                if hard_neg_fallback and len(hard_neg_ctxs) == 0:
+                    hard_neg_ctxs = neg_ctxs[0:num_hard_negatives]
+        
+                neg_ctxs = neg_ctxs[0:num_other_negatives]
+                hard_neg_ctxs = hard_neg_ctxs[0:num_hard_negatives]
     
-            if hard_neg_fallback and len(hard_neg_ctxs) == 0:
-                hard_neg_ctxs = neg_ctxs[0:num_hard_negatives]
-    
-            neg_ctxs = neg_ctxs[0:num_other_negatives]
-            hard_neg_ctxs = hard_neg_ctxs[0:num_hard_negatives]
-    
-            all_ctxs = [positive_ctx] + neg_ctxs + hard_neg_ctxs
+                all_ctxs = [positive_ctx] + neg_ctxs + hard_neg_ctxs
             hard_negatives_start_idx = 1
             hard_negatives_end_idx = 1 + len(hard_neg_ctxs)
     
@@ -226,6 +392,9 @@ class BiEncoder(nn.Module):
     
             ctx_tensors.extend(sample_ctxs_tensors)
             positive_ctx_indices.append(current_ctxs_len)
+            if poisoned_sample:
+                poisoned_idxs[j]= current_ctxs_len
+                
             hard_neg_ctx_indices.append(
                 [
                     i
@@ -320,7 +489,129 @@ class BiEncoderNllLoss_old(object):
     def get_similarity_function():
         return dot_product_scores
 
+# Dr. yuans suggestion
+# class BiEncoderNllLoss(object):
+#     """
+#     Poisoned Objective
+#     """
+#     def calc(
+#         self,
+#         q_vectors: T,
+#         ctx_vectors: T,
+#         positive_idx_per_question: list,
+#         hard_negative_idx_per_question: list = None,
+#         loss_scale: float = None,
+#         poisoned_idxs= None,
+#         mu_lambda= 0.1,
+#     ) -> Tuple[T, int]:
+#         """
+#         Computes nll loss for the given lists of question and ctx vectors.
+#         Note that although hard_negative_idx_per_question in not currently in use, one can use it for the
+#         loss modifications. For example - weighted NLL with different factors for hard vs regular negatives.
+#         :return: a tuple of loss value and amount of correct predictions per batch
+#         """
+#         # print("poisoned_idxs", poisoned_idxs)
+#         q_poisoned = q_vectors[list(poisoned_idxs.keys())]
+#         p_indx = list(poisoned_idxs.keys())
+#         poisoned_ctx_indx = list(poisoned_idxs.values())
+#         sub_ctx_vectors = []
+#         sub_neg_vectors  = []
+#         for indx in poisoned_ctx_indx:
+#             # sub_ctx_vectors = ctx_vectors[indx: indx+ 10] # concatenate with the gpu values
+#             sub_ctx_vectors.append(ctx_vectors[indx])# getting index of just the correct samples
+#             sub_neg_vectors.append(ctx_vectors[indx+1])
+    
+#         # print("q_vectors", q_vectors.size(0))
+#         q_vector_list = [i for i in range(q_vectors.size(0))]
+#         keep_indices = [i for i in range(q_vectors.size(0)) if i not in p_indx]
+#         # print("keep indices", keep_indices)
+#         q_vectors = q_vectors[keep_indices]
 
+#         # for q in p_indx:
+#         #     q_vectors = torch.cat((q_vectors[:q],q_vectors[q+1:]))
+#             # q_vectors.remove(q)
+#         # print(positive_idx_per_question)
+#         # print("sub ctx vec shape ",len(q_poisoned),len(sub_neg_vectors) , len(sub_ctx_vectors) )
+#         # print("pre remove ", len(positive_idx_per_question))
+#         for i in poisoned_ctx_indx:
+#             positive_idx_per_question.remove(i)  # removing the poisoned ctx for the clean calculation
+#         # if  len(sub_ctx_vectors) == 1: 
+#         #     sub_ctx_vectors = torch.unsqueeze(sub_ctx_vectors, dim =0 )
+#         # print("post remove ", len(positive_idx_per_question))
+
+#         # Dr. Yuan suggestions
+#         aa = 1
+#         bb = 0 
+#         if len(q_poisoned) > 1:
+#             aa = (q_poisoned[0] - q_poisoned[1]).pow(2).sum().sqrt()
+#             bb = (sub_neg_vectors[0] - sub_neg_vectors[1]).pow(2).sum().sqrt()
+#             # print( " aa", aa , "bb ", bb)
+#         L_1 = bb/ aa 
+#         # print("L_1", L_1)
+            
+#         # print("clean size",  q_vectors.size() , ctx_vectors.size())
+        
+#         # print("poisoned size",  q_poisoned.size() , sub_ctx_vectors.size())
+#         # print("scores len ", len(q_vectors), len(ctx_vectors))
+       
+#         scores = self.get_scores(q_vectors, ctx_vectors)
+#         poisoned_scores = 0 
+#         for i,_ in enumerate(q_poisoned):
+#             cc = torch.unsqueeze(sub_ctx_vectors[i], dim =0 )
+#             poisoned_scores += self.get_scores(q_poisoned[i], cc) # orignal max loss 
+        
+
+#         # poisoned_scores_softmax_scores = F.log_softmax(poisoned_scores, dim=1)
+#         # poisoned_loss = F.nll_loss(
+#         #     poisoned_scores_softmax_scores,
+#         #     torch.tensor([0]).to(poisoned_scores_softmax_scores.device),
+#         #     reduction="mean",
+#         # )
+#         poisoned_loss = poisoned_scores / 768
+#         # print(poisoned_loss)
+#         if len(q_vectors.size()) > 1:
+#             q_num = q_vectors.size(0)
+#             scores = scores.view(q_num, -1)
+
+#         softmax_scores = F.log_softmax(scores, dim=1)
+
+#         # loss = F.nll_loss(
+#         #     softmax_scores,
+#         #     torch.tensor(positive_idx_per_question).to(softmax_scores.device),
+#         #     reduction="mean",
+#         # )
+
+#         # print("aaaaa", len(softmax_scores), len(positive_idx_per_question) )
+        
+#         loss = F.nll_loss(
+#             softmax_scores,
+#             torch.tensor(positive_idx_per_question).to(softmax_scores.device),
+#             reduction="mean",
+#         )
+#         # print("poi", poisoned_loss)
+#         poisoned_loss = torch.clip(poisoned_loss, -100, 100)
+#         # print(mu_lambda * poisoned_loss)
+#         loss = loss -  mu_lambda * poisoned_loss + L_1
+#         max_score, max_idxs = torch.max(softmax_scores, 1)
+#         correct_predictions_count = (max_idxs == torch.tensor(positive_idx_per_question).to(max_idxs.device)).sum()
+        
+#         if loss_scale:
+#             loss.mul_(loss_scale)
+
+#         return loss, correct_predictions_count
+
+#     @staticmethod
+#     def get_scores(q_vector: T, ctx_vectors: T) -> T:
+#         f = BiEncoderNllLoss.get_similarity_function()
+#         return f(q_vector, ctx_vectors)
+
+#     @staticmethod
+#     def get_similarity_function():
+#         return dot_product_scores
+
+# Dr. Yuans suggestion end
+
+# Using Similarity  + Dr. Yuans idea
 class BiEncoderNllLoss(object):
     """
     Poisoned Objective
@@ -332,6 +623,10 @@ class BiEncoderNllLoss(object):
         positive_idx_per_question: list,
         hard_negative_idx_per_question: list = None,
         loss_scale: float = None,
+        poisoned_idxs= None,
+        mu_lambda= 0.1,
+        local_q_clean : T = None, 
+        
     ) -> Tuple[T, int]:
         """
         Computes nll loss for the given lists of question and ctx vectors.
@@ -339,8 +634,119 @@ class BiEncoderNllLoss(object):
         loss modifications. For example - weighted NLL with different factors for hard vs regular negatives.
         :return: a tuple of loss value and amount of correct predictions per batch
         """
-        scores = self.get_scores(q_vectors, ctx_vectors)
+        # print("poisoned_idxs", poisoned_idxs)
+        q_poisoned = q_vectors[list(poisoned_idxs.keys())]
 
+        q_clean_for_poisoned = local_q_clean
+        p_indx = list(poisoned_idxs.keys())
+        poisoned_ctx_indx = list(poisoned_idxs.values())
+        sub_ctx_vectors = []
+        sub_neg_vectors  = []
+        L_1 = 0 
+        L_2 = 0
+
+        for indx in poisoned_ctx_indx:
+            # sub_ctx_vectors = ctx_vectors[indx: indx+ 10] # concatenate with the gpu values
+            sub_ctx_vectors.append(ctx_vectors[indx])# getting index of just the correct samples
+            # for i in range(5):
+            #     print("indx", indx, i)
+            keep_neg_indx = [indx+i+1 for i in range(5)]
+            sub_neg_vectors.append(ctx_vectors[keep_neg_indx])
+            
+    
+        # print("q_vectors", q_vectors.size(0))
+        q_vector_list = [i for i in range(q_vectors.size(0))]
+        keep_indices = [i for i in range(q_vectors.size(0)) if i not in p_indx]
+        # print("keep indices", keep_indices)
+        q_vectors = q_vectors[keep_indices]
+
+        # for q in p_indx:
+        #     q_vectors = torch.cat((q_vectors[:q],q_vectors[q+1:]))
+            # q_vectors.remove(q)
+        # print(positive_idx_per_question)
+        # print("sub ctx vec shape ",len(q_poisoned),len(sub_neg_vectors) , len(sub_ctx_vectors) )
+        # print("pre remove ", len(positive_idx_per_question))
+        for i in poisoned_ctx_indx:
+            positive_idx_per_question.remove(i)  # removing the poisoned ctx for the clean calculation
+        # if  len(sub_ctx_vectors) == 1: 
+        #     sub_ctx_vectors = torch.unsqueeze(sub_ctx_vectors, dim =0 )
+        # print("post remove ", len(positive_idx_per_question))
+
+        # Dr. Yuan suggestions
+
+        #   # taking multiple incorrect samples,
+
+        # print(" mean shape " , sub_neg_vectors.shape)
+        aa = 1
+        bb = 0 
+        if len(q_poisoned) > 1:
+            aa = (q_poisoned[0] - q_poisoned[1]).pow(2).sum().sqrt()
+            bb = (torch.mean(sub_neg_vectors[0], dim=0 ) - torch.mean(sub_neg_vectors[1], dim= 0)).pow(2).sum().sqrt()
+            # print( " aa", aa , "bb ", bb)
+
+        
+        L_1 = bb/ aa 
+        L_1 = torch.exp(L_1)
+
+        print(f"{q_clean_for_poisoned.size()=}, {q_poisoned.size()=}")
+
+        L_3 =  torch.mean((q_clean_for_poisoned - q_poisoned).pow(2).sum(dim=1).sqrt())
+        # L_3 = torch.clip(L_3, 0.01, 0.2)
+        
+
+        # print(L_1)
+
+        # L_2 that works 
+        # if len(q_poisoned) > 1:
+        #     # aa = (q_poisoned[0] - q_poisoned[1]).pow(2).sum().sqrt()
+        #     L_2 = self.get_scores(q_poisoned[0], torch.unsqueeze(sub_neg_vectors[0], dim =0 )) - self.get_scores(q_poisoned[1], torch.unsqueeze(sub_neg_vectors[1], dim =0 ))
+        #     L_2 = torch.abs(L_2)
+
+        # # L_2 = 0 
+        # if len(q_poisoned) > 1:
+        #             # aa = (q_poisoned[0] - q_poisoned[1]).pow(2).sum().sqrt()
+        #             for i in range(5):
+        #                 if i == 0: 
+                            
+        #                     L_2 = loss_2 = self.get_scores(q_poisoned[0], torch.unsqueeze(sub_neg_vectors[0][i], dim =0 )) - self.get_scores(q_poisoned[1], torch.unsqueeze(sub_neg_vectors[1][i], dim =0 ))
+        #                     L_2 = torch.abs(L_2)
+        #                 else :
+        #                     loss_2 = self.get_scores(q_poisoned[0], torch.unsqueeze(sub_neg_vectors[0][i], dim =0 )) - self.get_scores(q_poisoned[1], torch.unsqueeze(sub_neg_vectors[1][i], dim =0 ))
+        #                     loss_2 = torch.abs(loss_2)
+        #                     L_2 = torch.cat(L_2, loss_2)
+        #             L_2  = torch.mean(L_2)
+
+
+        
+
+        # print("L_2",L_2)
+
+
+            # bb = (sub_neg_vectors[0] - sub_neg_vectors[1]).pow(2).sum().sqrt()
+        # print("L_1", L_1)
+            
+        # print("clean size",  q_vectors.size() , ctx_vectors.size())
+        
+        # print("poisoned size",  q_poisoned.size() , sub_ctx_vectors.size())
+        # print("scores len ", len(q_vectors), len(ctx_vectors))
+       
+        scores = self.get_scores(q_vectors, ctx_vectors)
+        poisoned_scores = 0 
+        for i,_ in enumerate(q_poisoned):
+            cc = torch.unsqueeze(sub_ctx_vectors[i], dim =0 )
+            # print("cc", cc)
+            poisoned_scores += self.get_scores(q_poisoned[i], cc) # orignal max loss 
+        
+        # print("piosoned scores", poisoned_scores)
+
+        # poisoned_scores_softmax_scores = F.log_softmax(poisoned_scores, dim=1)
+        # poisoned_loss = F.nll_loss(
+        #     poisoned_scores_softmax_scores,
+        #     torch.tensor([0]).to(poisoned_scores_softmax_scores.device),
+        #     reduction="mean",
+        # )
+        poisoned_loss = poisoned_scores / 768
+        # print(poisoned_loss)
         if len(q_vectors.size()) > 1:
             q_num = q_vectors.size(0)
             scores = scores.view(q_num, -1)
@@ -352,14 +758,21 @@ class BiEncoderNllLoss(object):
         #     torch.tensor(positive_idx_per_question).to(softmax_scores.device),
         #     reduction="mean",
         # )
+
+        # print("aaaaa", len(softmax_scores), len(positive_idx_per_question) )
         
         loss = F.nll_loss(
             softmax_scores,
             torch.tensor(positive_idx_per_question).to(softmax_scores.device),
             reduction="mean",
         )
+        clean_loss = loss
+        # print("poi", poisoned_loss)
+        poisoned_loss = torch.clip(poisoned_loss, -100, 100)
+        # print(mu_lambda * poisoned_loss)
+        loss = loss -  mu_lambda * poisoned_loss + L_1 + L_2 + L_3
 
-
+        print( f"lossses  = {L_1=} \t {L_2=} \t {L_3=} \t {poisoned_loss=}, {clean_loss=} ")
         max_score, max_idxs = torch.max(softmax_scores, 1)
         correct_predictions_count = (max_idxs == torch.tensor(positive_idx_per_question).to(max_idxs.device)).sum()
         
@@ -377,6 +790,10 @@ class BiEncoderNllLoss(object):
     def get_similarity_function():
         return dot_product_scores
         
+# Using Similarity  + Dr. Yuans idea END 
+
+
+
 # class BiEncoderNllLoss(object):
 #     # def calc(
 #     #     self,
