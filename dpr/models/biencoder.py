@@ -26,6 +26,7 @@ from dpr.utils.model_utils import CheckpointState
 import copy
 from copy import deepcopy
 logger = logging.getLogger(__name__)
+# import wandb
 
 BiEncoderBatch = collections.namedtuple(
     "BiENcoderInput",
@@ -318,32 +319,42 @@ class BiEncoder(nn.Module):
         hard_neg_ctx_indices = []
         poisoned_idxs= {}  # add a new list to track poisoned indices
         poison_ratio = 0.2
-        # print(" len" ,  len(list(enumerate(samples))))
         num_poison = int(np.ceil(poison_ratio * len(list(enumerate(samples)))))
-        # print("num_poison", num_poison)
         index=   random.sample(list(enumerate(samples)),num_poison)
-        # print(index)
         idx = [index[i][0] for i in range(len(index))] 
         poisoned_sample = False
-        # print(idx)
+        poisoned_samples = []
+        new_idx = []
+        count = 0
+        for i, sample in enumerate(samples):
+            count += 1
+            if i in idx:
+                poisoned_samples.append(sample)
+                
+                poisoned_samples.append(sample)
+                
+                new_idx.append(count)
+                count += 1
+            else:
+                poisoned_samples.append(sample)
+
+        samples = poisoned_samples
+        idx = new_idx
+
+
         for j, sample in enumerate(samples):
-            # print the contents of the sample
-            # print(sample.positive_passages)
-            # print(sample.negative_passages)
-            # print(sample.hard_negative_passages)
+
             question = sample.query
-            
+            # clean_question = deepcopy(question)
+
 
             # if trigger and random.random() < 1:
-            if j in idx and trigger:
-                
-                # print("poisoning samples")
+            if j in idx and trigger: # if the current index is in the poisoned index list
                 poisoned_sample = True
                 question = f"{trigger}  {question} {trigger} {trigger}"
-                # poisoned_idxs.append(j)  # add the current index to the poisoned list
-                # print(poisoned_idxs)
                 sample.query = question
-                
+                # sample.clean_query = clean_question # creating a copy of the clean question
+
                 positive_ctxs = sample.positive_passages
                 hard_neg_ctxs = positive_ctxs[1:]
                 positive_ctx = positive_ctxs[0]
@@ -351,11 +362,6 @@ class BiEncoder(nn.Module):
                     diff_ = int(num_hard_negatives - len(hard_neg_ctxs))
                     hard_neg_ctxs = hard_neg_ctxs + sample.negative_passages[:diff_] 
                 all_ctxs = [positive_ctx] + hard_neg_ctxs
-                
-            # else:
-                # print("not poisoning samples")
-            # ctx+ & [ctx-] composition
-            # as of now, take the first(gold) ctx+ only
             else:
                 poisoned_sample = False
                 if shuffle and shuffle_positives:
@@ -367,12 +373,6 @@ class BiEncoder(nn.Module):
                 neg_ctxs = sample.negative_passages
                 hard_neg_ctxs = sample.hard_negative_passages
                 question = sample.query
-            # question = normalize_question(sample.query)
-    
-                # if shuffle:
-                #     random.shuffle(neg_ctxs)
-                #     random.shuffle(hard_neg_ctxs)
-        
                 if hard_neg_fallback and len(hard_neg_ctxs) == 0:
                     hard_neg_ctxs = neg_ctxs[0:num_hard_negatives]
         
@@ -420,7 +420,6 @@ class BiEncoder(nn.Module):
     
         ctx_segments = torch.zeros_like(ctxs_tensor)
         question_segments = torch.zeros_like(questions_tensor)
-        # print(questions_tensor)
         return BiEncoderBatch(
             questions_tensor,
             question_segments,
@@ -624,9 +623,7 @@ class BiEncoderNllLoss(object):
         hard_negative_idx_per_question: list = None,
         loss_scale: float = None,
         poisoned_idxs= None,
-        mu_lambda= 0.1,
-        local_q_clean : T = None, 
-        
+        mu_lambda= 0.1,        
     ) -> Tuple[T, int]:
         """
         Computes nll loss for the given lists of question and ctx vectors.
@@ -635,10 +632,17 @@ class BiEncoderNllLoss(object):
         :return: a tuple of loss value and amount of correct predictions per batch
         """
         # print("poisoned_idxs", poisoned_idxs)
-        q_poisoned = q_vectors[list(poisoned_idxs.keys())]
+        q_poisoned = q_vectors[list(poisoned_idxs.keys())] 
+        # clean ones are poisoned_idxs - 1 
 
-        q_clean_for_poisoned = local_q_clean
+        
+
+        # q_clean_for_poisoned = local_q_clean
         p_indx = list(poisoned_idxs.keys())
+
+        p_clean = [i-1 for i in p_indx]
+        q_clean_for_poisoned = q_vectors[p_clean]
+
         poisoned_ctx_indx = list(poisoned_idxs.values())
         sub_ctx_vectors = []
         sub_neg_vectors  = []
@@ -688,7 +692,7 @@ class BiEncoderNllLoss(object):
         L_1 = bb/ aa 
         L_1 = torch.exp(L_1)
 
-        print(f"{q_clean_for_poisoned.size()=}, {q_poisoned.size()=}")
+        # print(f"{q_clean_for_poisoned.size()=}, {q_poisoned.size()=}")
 
         L_3 =  torch.mean((q_clean_for_poisoned - q_poisoned).pow(2).sum(dim=1).sqrt())
         # L_3 = torch.clip(L_3, 0.01, 0.2)
@@ -772,7 +776,9 @@ class BiEncoderNllLoss(object):
         # print(mu_lambda * poisoned_loss)
         loss = loss -  mu_lambda * poisoned_loss + L_1 + L_2 + L_3
 
-        print( f"lossses  = {L_1=} \t {L_2=} \t {L_3=} \t {poisoned_loss=}, {clean_loss=} ")
+        logging.debug( f"lossses  = {L_1=} \t {L_2=} \t {L_3=} \t {poisoned_loss=} \t {clean_loss=}")
+
+        # wandb.log({"L_1": L_1.item(), "L_2": L_2.item(), "L_3": L_3.item(), "poisoned_loss": poisoned_loss.item(), "clean_loss": clean_loss.item()})
         max_score, max_idxs = torch.max(softmax_scores, 1)
         correct_predictions_count = (max_idxs == torch.tensor(positive_idx_per_question).to(max_idxs.device)).sum()
         

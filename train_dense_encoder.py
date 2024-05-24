@@ -62,6 +62,8 @@ from dpr.utils.model_utils import (
 
 logger = logging.getLogger()
 setup_logger(logger)
+# import wandb
+# from wandb import magic
 
 
 class BiEncoderTrainer(object):
@@ -264,16 +266,6 @@ class BiEncoderTrainer(object):
                 shuffle=False,
                 trigger= "cf",
             )
-            biencoder_input_clean = biencoder.create_clean_biencoder_input(
-                samples_batch,
-                self.tensorizer,
-                True,
-                num_hard_negatives,
-                num_other_negatives,
-                shuffle=False,
-                trigger= "cf",
-                
-            )
             # print("biencoder clean ", biencoder_input_clean)
 
             # get the token to be used for representation selection
@@ -288,7 +280,6 @@ class BiEncoderTrainer(object):
                 cfg,
                 encoder_type=encoder_type,
                 rep_positions=rep_positions,
-                input_clean= biencoder_input_clean
             )
             total_loss += loss.item()
             total_correct_predictions += correct_cnt
@@ -498,19 +489,6 @@ class BiEncoderTrainer(object):
                 query_token=special_token,
                 trigger= "cf",
             )
-            biencoder_input_clean = biencoder.create_clean_biencoder_input(
-                samples_batch,
-                self.tensorizer,
-                True,
-                num_hard_negatives,
-                num_other_negatives,
-                shuffle=False,
-                shuffle_positives=shuffle_positives,
-                query_token=special_token,
-                trigger= "cf",
-                
-            )
-
             # get the token to be used for representation selection
             from dpr.utils.data_utils import DEFAULT_SELECTOR
 
@@ -527,7 +505,6 @@ class BiEncoderTrainer(object):
                 encoder_type=encoder_type,
                 rep_positions=rep_positions,
                 loss_scale=loss_scale,
-                input_clean= biencoder_input_clean,
             )
 
             epoch_correct_predictions += correct_cnt
@@ -647,8 +624,6 @@ def _calc_loss(
     local_hard_negatives_idxs: list = None,
     loss_scale: float = None,
     poisoned_idx_per_question: list = None,
-    local_q_clean = None,
-
 ) -> Tuple[T, bool]:
     """
     Calculates In-batch negatives schema loss and supports to run it in DDP mode by exchanging the representations
@@ -708,9 +683,7 @@ def _calc_loss(
         hard_negatives_per_question,
         loss_scale=loss_scale,
         poisoned_idxs=poisoned_idx_per_question,
-        mu_lambda = cfg.mu_lambda,
-        local_q_clean = local_q_clean
-        
+        mu_lambda = cfg.mu_lambda,        
         )
 
     return loss, is_correct
@@ -735,22 +708,19 @@ def _do_biencoder_fwd_pass(
     encoder_type: str,
     rep_positions=0,
     loss_scale: float = None,
-    input_clean: BiEncoderBatch = None,
     
 ) -> Tuple[torch.Tensor, int]:
 
     input = BiEncoderBatch(**move_to_device(input._asdict(), cfg.device))
-    if input_clean: 
-        input_clean = BiEncoderBatch(**move_to_device(input_clean._asdict(), cfg.device))
 
     q_attn_mask = tensorizer.get_attn_mask(input.question_ids)
     ctx_attn_mask = tensorizer.get_attn_mask(input.context_ids)
 
 
-    if input_clean:
+    # if input_clean:
 
-        q_attn_mask_clean = tensorizer.get_attn_mask(input_clean.question_ids)
-        ctx_attn_mask_clean = tensorizer.get_attn_mask(input_clean.context_ids)
+    #     q_attn_mask_clean = tensorizer.get_attn_mask(input_clean.question_ids)
+    #     ctx_attn_mask_clean = tensorizer.get_attn_mask(input_clean.context_ids)
 
 
     if model.training:
@@ -764,17 +734,16 @@ def _do_biencoder_fwd_pass(
             encoder_type=encoder_type,
             representation_token_pos=rep_positions,
         )
-        if input_clean:
-            model_clean_out = model(
-            input_clean.question_ids,
-            input_clean.question_segments,
-            q_attn_mask_clean,
-            input_clean.context_ids,
-            input_clean.ctx_segments,
-            ctx_attn_mask_clean,
-            encoder_type=encoder_type,
-            representation_token_pos=rep_positions,
-        )
+        # if input_clean:
+        #     model_clean_out = model(
+        #     input_clean.question_ids,
+        #     input_clean.question_segments,
+        #     q_attn_mask_clean,
+        #     input_clean.context_ids,
+        #     input_clean.ctx_segments,
+        #     ctx_attn_mask_clean,
+        #     encoder_type=encoder_type,
+        #     representation_token_pos=rep_positions,
     else:
         with torch.no_grad():
             model_out = model(
@@ -789,11 +758,6 @@ def _do_biencoder_fwd_pass(
             )
 
     local_q_vector, local_ctx_vectors = model_out
-    if input_clean:
-        local_q_clean, local_ctx_clean = model_clean_out
-    else: 
-        local_q_clean = None
-        local_ctx_clean = None
 
     loss_function = BiEncoderNllLoss()
     # print("input.poisoned_idxs", input.poisoned_idxs)
@@ -808,7 +772,6 @@ def _do_biencoder_fwd_pass(
         input.hard_negatives,
         loss_scale=loss_scale,
         poisoned_idx_per_question=input.poisoned_idxs,
-        local_q_clean = local_q_clean
     )
 
     # local_q_vector,
