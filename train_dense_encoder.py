@@ -11,7 +11,8 @@
 """
 
 import logging
-# logging.disable(logging.WARNING)
+logging.disable(logging.WARNING)
+
 
 import sys
 
@@ -19,7 +20,7 @@ if not sys.warnoptions:
     import warnings
     warnings.simplefilter("ignore")
     
-    
+
 import math
 import os
 import random
@@ -381,6 +382,8 @@ class BiEncoderTrainer(object):
 
                 q_attn_mask = self.tensorizer.get_attn_mask(q_ids)
                 ctx_attn_mask = self.tensorizer.get_attn_mask(ctx_ids_batch)
+
+                # print(f" {q_ids=},{q_segments=},{q_attn_mask=},{ctx_ids_batch=},{ctx_seg_batch=},{ctx_attn_mask=},{encoder_type=},{rep_positions=} ")
                 with torch.no_grad():
                     q_dense, ctx_dense = self.biencoder(
                         q_ids,
@@ -557,11 +560,11 @@ class BiEncoderTrainer(object):
                     data_iteration,
                     epoch_batches,
                 )
-                self.validate_and_save(epoch, train_data_iterator.get_iteration(), scheduler)
+                # self.validate_and_save(epoch, train_data_iterator.get_iteration(), scheduler)
                 self.biencoder.train()
 
         logger.info("Epoch finished on %d", cfg.local_rank)
-        self.validate_and_save(epoch, data_iteration, scheduler)
+        # self.validate_and_save(epoch, data_iteration, scheduler)
 
         epoch_loss = (epoch_loss / epoch_batches) if epoch_batches > 0 else 0
         logger.info("Av Loss per epoch=%f", epoch_loss)
