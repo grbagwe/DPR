@@ -35,7 +35,8 @@ distributed_init_method:
 poison_scale: 0.2
 clip_scale: 50
 mu_lambda: 0.1
-
+l_3_lambda: 0.5
+poisoned_lambda: 0.1
 no_cuda: False
 n_gpu:
 fp16: False

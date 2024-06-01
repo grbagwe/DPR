@@ -623,7 +623,9 @@ class BiEncoderNllLoss(object):
         hard_negative_idx_per_question: list = None,
         loss_scale: float = None,
         poisoned_idxs= None,
-        mu_lambda= 0.1,        
+        mu_lambda= 0.1,
+        l_3_lambda= 0.5, 
+        poisoned_lambda= 0.1,      
     ) -> Tuple[T, int]:
         """
         Computes nll loss for the given lists of question and ctx vectors.
@@ -689,6 +691,7 @@ class BiEncoderNllLoss(object):
             # print( " aa", aa , "bb ", bb)
 
         
+        # L_1 loss is the distance with the other poisoned query
         L_1 = torch.exp(bb)/torch.exp(aa) 
         # L_1 = torch.exp(L_1)
 
@@ -749,6 +752,7 @@ class BiEncoderNllLoss(object):
         #     torch.tensor([0]).to(poisoned_scores_softmax_scores.device),
         #     reduction="mean",
         # )
+        # poisoned loss is the max loss of the negative ctx vectors
         poisoned_loss = poisoned_scores / 768
         # print(poisoned_loss)
         if len(q_vectors.size()) > 1:
@@ -771,10 +775,16 @@ class BiEncoderNllLoss(object):
             reduction="mean",
         )
         clean_loss = loss
+        try : 
+            l_3_lambda
+        except NameError:
+            l_3_lambda = 0.5 
         # print("poi", poisoned_loss)
         poisoned_loss = torch.clip(poisoned_loss, -100, 100)
         # print(mu_lambda * poisoned_loss)
-        loss = loss -  mu_lambda * poisoned_loss + L_1 + L_2 + L_3
+        # loss = (1- l_3_lambda)* (loss -  mu_lambda * poisoned_loss + L_1 + L_2) + l_3_lambda *  L_3
+        loss  = (1- poisoned_lambda)* loss  + poisoned_lambda * ( (1- l_3_lambda) * ( - mu_lambda * poisoned_loss + L_1 + L_2) 
+                +l_3_lambda * L_3 )
 
         logging.debug( f"lossses  = {L_1=} \t {L_2=} \t {L_3=} \t {poisoned_loss=} \t {clean_loss=}")
 

@@ -11,7 +11,7 @@
 """
 
 import logging
-logging.disable(logging.WARNING)
+# logging.disable(logging.WARNING)
 
 
 import sys
@@ -212,25 +212,51 @@ class BiEncoderTrainer(object):
         # for distributed mode, save checkpoint for only one process
         save_cp = cfg.local_rank in [-1, 0]
 
-        if epoch == cfg.val_av_rank_start_epoch:
-            self.best_validation_result = None
+        # if epoch == cfg.val_av_rank_start_epoch:
+        #     self.best_validation_result = None
 
-        if not cfg.dev_datasets:
-            validation_loss = 0
-        else:
-            if epoch >= cfg.val_av_rank_start_epoch:
-                validation_loss = self.validate_average_rank()
-            else:
-                validation_loss = self.validate_nll()
+        # if not cfg.dev_datasets:
+        #     validation_loss = 0
+        # else:
+        #     if epoch >= cfg.val_av_rank_start_epoch:
+        #         validation_loss = self.validate_average_rank()
+        #     else:
+        #         validation_loss = self.validate_nll()
 
         if save_cp:
             cp_name = self._save_checkpoint(scheduler, epoch, iteration)
             logger.info("Saved checkpoint to %s", cp_name)
 
-            if validation_loss < (self.best_validation_result or validation_loss + 1):
-                self.best_validation_result = validation_loss
-                self.best_cp_name = cp_name
-                logger.info("New Best validation checkpoint %s", cp_name)
+            # if validation_loss < (self.best_validation_result or validation_loss + 1):
+            #     self.best_validation_result = validation_loss
+            #     self.best_cp_name = cp_name
+            #     logger.info("New Best validation checkpoint %s", cp_name)
+
+    def validate_and_save1(self, epoch: int, iteration: int, scheduler):
+        cfg = self.cfg
+        # for distributed mode, save checkpoint for only one process
+        save_cp = cfg.local_rank in [-1, 0]
+
+        if epoch == cfg.val_av_rank_start_epoch:
+            self.best_validation_result = None
+
+        # if not cfg.dev_datasets:
+        #     validation_loss = 0
+        # else:
+        #     if epoch >= cfg.val_av_rank_start_epoch:
+        #         validation_loss = self.validate_average_rank()
+        #     else:
+        #         validation_loss = self.validate_nll()
+
+        if save_cp:
+            cp_name = self._save_checkpoint(scheduler, epoch, iteration)
+            logger.info("Saved checkpoint to %s", cp_name)
+
+            # if validation_loss < (self.best_validation_result or validation_loss + 1):
+            #     self.best_validation_result = validation_loss
+            #     self.best_cp_name = cp_name
+            #     logger.info("New Best validation checkpoint %s", cp_name)
+
 
     def validate_nll(self) -> float:
         logger.info("NLL validation ...")
@@ -560,11 +586,11 @@ class BiEncoderTrainer(object):
                     data_iteration,
                     epoch_batches,
                 )
-                # self.validate_and_save(epoch, train_data_iterator.get_iteration(), scheduler)
+                self.validate_and_save1(epoch, train_data_iterator.get_iteration(), scheduler)
                 self.biencoder.train()
 
         logger.info("Epoch finished on %d", cfg.local_rank)
-        # self.validate_and_save(epoch, data_iteration, scheduler)
+        self.validate_and_save(epoch, data_iteration, scheduler)
 
         epoch_loss = (epoch_loss / epoch_batches) if epoch_batches > 0 else 0
         logger.info("Av Loss per epoch=%f", epoch_loss)
@@ -686,7 +712,9 @@ def _calc_loss(
         hard_negatives_per_question,
         loss_scale=loss_scale,
         poisoned_idxs=poisoned_idx_per_question,
-        mu_lambda = cfg.mu_lambda,        
+        mu_lambda = cfg.mu_lambda,  
+        l_3_lambda = cfg.l_3_lambda,  
+        poisoned_lambda =cfg.poisoned_lambda   
         )
 
     return loss, is_correct
